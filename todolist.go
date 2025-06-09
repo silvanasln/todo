@@ -3,142 +3,130 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-
 type Todo struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Title     string             `bson:"title" json:"title"`
-	Completed bool               `bson:"completed" json:"completed"`
+	ID   int    `bson:"id" json:"id"`
+	Task string `bson:"task" json:"task"`
+	Done bool   `bson:"done" json:"done"`
 }
 
 var collection *mongo.Collection
 
 func main() {
-ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	fmt.Println("Starting the program...")
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+
+	fmt.Println("Connecting to MongoDB...")
+	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		log.Fatal("خطا در اتصال به مونگو:", err)
+		fmt.Println("Error connecting to MongoDB:", err)
+		return
 	}
-	defer client.Disconnect(context.Background())
+	defer client.Disconnect(ctx)
 
-	collection = client.Database("todoDB").Collection("tasks")
-
- 
-	count, _ := collection.CountDocuments(context.Background(), bson.M{})
-	if count == 0 {
-		todos := []interface{}{
-			Todo{Title: "خرید کردن", Completed: false},
-			Todo{Title: "کتاب خوندن", Completed: false},
-			Todo{Title: "فیلم دیدن", Completed: false},
-			Todo{Title: "پختن غذا", Completed: false},
-		}
-		_, err := collection.InsertMany(context.Background(), todos)
-		if err != nil {
-			log.Println("نمی‌تونم لیست اولیه رو ذخیره کنم! خطا:", err)
-		} else {
-			fmt.Println("لیست اولیه ثبت شد.")
-		}
+	fmt.Println("Pinging MongoDB...")
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		fmt.Println("Failed to ping MongoDB:", err)
+		return
 	}
+	fmt.Println("Successfully connected to MongoDB!")
 
+	collection = client.Database("tododb").Collection("todos")
 
- e := echo.New()
+	e := echo.New()
 
 	e.GET("/todos", getTodos)
 	e.POST("/todos", createTodo)
 	e.PUT("/todos/:id", updateTodo)
-	e.DELETE("/todos/:id", deleteTodo)
 
-	fmt.Println("وب‌سایت من روشنه! برو به پورت 8080...")
-	e.Logger.Fatal(e.Start(":8080"))
+	// اجرای سرور
+	fmt.Println("Starting Echo server on :1323...")
+	e.Start(":1323")
 }
 
-
 func getTodos(c echo.Context) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := context.Background()
+	fmt.Println("Fetching todos from MongoDB...")
 	cursor, err := collection.Find(ctx, bson.M{})
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, "خطا در خواندن کارها")
+		fmt.Println("Error finding todos:", err)
+		return err
 	}
 	defer cursor.Close(ctx)
 
 	var todos []Todo
-	for cursor.Next(ctx) {
-		var t Todo
-		if err := cursor.Decode(&t); err != nil {
-			return c.JSON(http.StatusInternalServerError, "خطا در دیکد کردن داده")
-		}
-		todos = append(todos, t)
+	if err = cursor.All(ctx, &todos); err != nil {
+		fmt.Println("Error decoding todos:", err)
+		return err
 	}
 	return c.JSON(http.StatusOK, todos)
 }
 
-
-
 func createTodo(c echo.Context) error {
+	ctx := context.Background()
+	fmt.Println("Creating a new todo...")
 	var todo Todo
 	if err := c.Bind(&todo); err != nil {
-		return c.JSON(http.StatusBadRequest, "ورودی نامعتبر")
+		fmt.Println("Error binding todo:", err)
+		return err
 	}
-	todo.Completed = false
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	res, err := collection.InsertOne(ctx, todo)
+
+	_, err := collection.InsertOne(ctx, todo)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, "خطا در ذخیره کار")
+		fmt.Println("Error inserting todo:", err)
+		return err
 	}
-	todo.ID = res.InsertedID.(primitive.ObjectID)
 	return c.JSON(http.StatusCreated, todo)
 }
 
-
 func updateTodo(c echo.Context) error {
-	idParam := c.Param("id")
-	todoID, err := primitive.ObjectIDFromHex(idParam)
+	ctx := context.Background()
+	fmt.Println("Updating a todo...")
+
+	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, "شناسه نامعتبر")
+		fmt.Println("Error converting id to integer:", err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid ID"})
 	}
+
+	var updatedTodo Todo
+	if err := c.Bind(&updatedTodo); err != nil {
+		fmt.Println("Error binding updated todo:", err)
+		return err
+	}
+
+	filter := bson.M{"id": id}
+	update := bson.M{"$set": bson.M{"task": updatedTodo.Task, "done": updatedTodo.Done}}
+	result, err := collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		fmt.Println("Error updating todo:", err)
+		return err
+	}
+
+	if result.MatchedCount == 0 {
+		fmt.Println("No todo found with id:", id)
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Todo not found"})
+	}
+
 	var todo Todo
-	if err := c.Bind(&todo); err != nil {
-		return c.JSON(http.StatusBadRequest, "ورودی نامعتبر")
-	}
-	update := bson.M{
-		"$set": bson.M{
-			"title":     todo.Title,
-			"completed": todo.Completed,
-		},
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err = collection.UpdateOne(ctx, bson.M{"_id": todoID}, update)
+	err = collection.FindOne(ctx, filter).Decode(&todo)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, "خطا در ویرایش کار")
+		fmt.Println("Error fetching updated todo:", err)
+		return err
 	}
-	return c.JSON(http.StatusOK, "کار به‌روزرسانی شد")
+
+	return c.JSON(http.StatusOK, todo)
 }
 
-func deleteTodo(c echo.Context) error {
-	idParam := c.Param("id")
-	todoID, err := primitive.ObjectIDFromHex(idParam)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, "شناسه نامعتبر")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err = collection.DeleteOne(ctx, bson.M{"_id": todoID})
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, "خطا در حذف کار")
-	}
-	return c.JSON(http.StatusOK, "کار حذف شد")
-}
